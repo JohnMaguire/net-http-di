@@ -15,21 +15,28 @@ func main() {
 	log := logrus.New()
 	repo := &CounterRepo{}
 
-	r := chi.NewRouter()
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		// Build request dependencies
-		requestLog := logrus.NewEntry(log).WithField("requestID", uuid.New())
-		s := &CounterService{
-			repo: repo,
-			log:  requestLog,
-		}
+	MakeHandler := func(
+		// TODO Accept variadic dependencies and resolve them
+		fn func(w http.ResponseWriter, r *http.Request, s *CounterService),
+	) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			s := &CounterService{
+				repo: repo,
+				log:  log.WithField("requestID", uuid.New()),
+			}
 
+			fn(w, r, s)
+		}
+	}
+
+	r := chi.NewRouter()
+	r.Get("/", MakeHandler(func(w http.ResponseWriter, r *http.Request, s *CounterService) {
 		// Use a dependency and render a response
 		count := s.IncreaseCount()
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(fmt.Sprintf("You are visitor #%d", count)))
-	})
+	}))
 
 	http.ListenAndServe(":3000", r)
 }
