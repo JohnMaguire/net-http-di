@@ -6,26 +6,64 @@ import (
 	"sync"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/goava/di"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
-func main() {
-	// Build global dependencies
-	log := logrus.New()
-	repo := &CounterRepo{}
+type logrusTracer struct {
+	logrus.Ext1FieldLogger
+}
 
+func (l *logrusTracer) Trace(format string, args ...interface{}) {
+	l.Ext1FieldLogger.WithField("source", "goava/di").Tracef(format, args...)
+}
+
+func main() {
+	log := logrus.New()
+	log.SetLevel(logrus.TraceLevel)
+	di.SetTracer(&logrusTracer{log})
+
+	// Create an application container
+	container, err := di.New(
+		di.Provide(func() *CounterRepo {
+			return &CounterRepo{}
+		}),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	// MakeHandler creates a request-scoped IoC container and wraps net/http-like functions
+	// (e.g. `func(w http.ResponseWriter, r *http.Request, s *CounterService)`) executing the
+	// handlers with its resolved dependencies.
 	MakeHandler := func(
-		// TODO Accept variadic dependencies and resolve them
-		fn func(w http.ResponseWriter, r *http.Request, s *CounterService),
+		fn any,
 	) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			s := &CounterService{
-				repo: repo,
-				log:  log.WithField("requestID", uuid.New()),
+			// Create a container for the request
+			requestContainer, err := di.New(
+				di.ProvideValue(w, di.As(new(http.ResponseWriter))),
+				di.ProvideValue(r),
+				di.Provide(func() *logrus.Entry {
+					return log.WithField("requestID", uuid.New())
+				}),
+				di.Provide(func(l *logrus.Entry, r *CounterRepo) *CounterService {
+					return &CounterService{repo: r, log: l}
+				}),
+			)
+			if err != nil {
+				panic(err)
 			}
+			defer container.Cleanup()
+			requestContainer.AddParent(container)
 
-			fn(w, r, s)
+			// Invoke the handler using reflection in the container to resolve
+			// its dependencies
+			err = requestContainer.Invoke(fn)
+			if err != nil {
+				panic(err)
+			}
 		}
 	}
 
@@ -40,6 +78,8 @@ func main() {
 
 	http.ListenAndServe(":3000", r)
 }
+
+// CODE BELOW IMPLEMENTS BASIC SERVICE DEPENDENCIES
 
 // CounterService is invoked by a handler and has dependencies of its own.
 type CounterService struct {
